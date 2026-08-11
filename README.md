@@ -33,9 +33,9 @@ Both are **summed, never averaged**, over whatever the reader selected. That dec
 **The roster is certainly incomplete and may contain mistakes — that is what this repository is for.** If someone is missing, or someone's information is wrong, please tell us — either way is welcome:
 
 - **Open an issue** describing the person and what is wrong or missing. This is the easiest route, and you do not need to know the data format.
-- **Send a PR** editing the files directly:
-  - `data/faculty.xlsx` — who is on the roster: `name`, `affiliation`, `country`, `homepage`
-  - `data/faculty_paper_list_w2016_2025.xlsx` — their papers: `name`, `title`, `pub_year`, `venue_name`, `impact_factor`, `n_authors`, plus one column per research area (`1` = the paper belongs to it)
+- **Send a PR** editing the files directly, both in [`data/`](data/):
+  - [`data/faculty.xlsx`](data/faculty.xlsx) — who is on the roster: `name`, `affiliation`, `country`, `homepage`
+  - [`data/faculty_paper_list_w2016_2025.xlsx`](data/faculty_paper_list_w2016_2025.xlsx) — their papers: `name`, `title`, `pub_year`, `venue_name`, `impact_factor`, `n_authors`, plus one column per research area (`1` = the paper belongs to it)
 
 Please say **why** in the issue or PR description — a homepage, a CV, a Google Scholar profile. Corrections to areas are as useful as corrections to people: the area labels are judged from titles and abstracts and they get things wrong.
 
@@ -43,12 +43,12 @@ Please say **why** in the issue or PR description — a homepage, a CV, a Google
 
 | file | rows | what it is |
 | --- | --- | --- |
-| `data/faculty.xlsx` | 1,089 | one row per person |
-| `data/faculty_paper_list_w2016_2025.xlsx` | 48,410 | one row per (person, paper), 2016–2025 |
+| [`data/faculty.xlsx`](data/faculty.xlsx) | 1,089 | one row per person |
+| [`data/faculty_paper_list_w2016_2025.xlsx`](data/faculty_paper_list_w2016_2025.xlsx) | 48,410 | one row per (person, paper), 2016–2025 |
 
 A paper co-authored by two people on the roster appears on both of their rows. Papers are labelled across 21 research areas in 6 groups, each column `1` or `0`; a paper can belong to several. `n_areas` is how many, and `area_evidence` is a one-line summary of what the paper is about — the reading the labels were assigned from, so you can see whether a wrong label came from a wrong reading.
 
-## How it is built — `data_computation/`
+## How it is built — [`data_computation/`](data_computation/)
 
 Run in order. All settings live in `meta_config.py`; the steps that talk to the API need `SEMANTIC_SCHOLAR_API_KEY` in the environment.
 
@@ -65,7 +65,7 @@ Run in order. All settings live in `meta_config.py`; the steps that talk to the 
 | — | *(area labelling)* | The 21 area columns are judged from that text in batches and written back into the paper list. This is the step humans should check, and the one PRs are most useful for. |
 | 9 | `export_webpage_data.py` | Aggregates to (person, year, area combination) and writes the files the site reads. Grouping by the *combination* is what keeps a paper in two areas counted once when a reader selects both. |
 
-`Workpipeline.txt` documents every step in full — inputs, outputs, and why each choice was made.
+[`Workpipeline.txt`](data_computation/Workpipeline.txt) documents every step in full — inputs, outputs, and why each choice was made.
 
 ### Scope and caveats
 
