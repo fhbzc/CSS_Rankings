@@ -49,23 +49,44 @@ it runs low where authors went unresolved, and weighted_if therefore runs high.
 The bias is larger for papers with big author lists. It is recorded in
 metrics.json rather than shown.
 
-Everything is written to manual_output/. That is the deliverable: copy it into
-webpage/processed_data/, which is the directory the site reads. The copy is left
-to you deliberately, so a re-export never overwrites what the site is serving
-until you say so.
+TWO SETS OF FILES COME OUT, written straight to where they are read from, and
+from one read of the inputs so the site and the repository can never describe
+different rosters:
+
+  ../webpage/processed_data/  the aggregates the SITE serves -- long by (person,
+                              year, area combination), plus metrics.json
+  ../upload_version/data/     the roster and the paper list THEMSELVES, as the
+                              public CSVs the GitHub repository publishes and
+                              takes corrections against
+
+Both directories are overwritten in place. Run --check first if you want to see
+what a run would produce without touching either; the previous contents of the
+site directory are copied to a .bak_<date>/ beside them, so the last served
+version is always one move away.
+
+The public files are CSV because GitHub cannot preview or diff a workbook: a
+pull request against one shows "binary file changed" and nothing else, so a
+correction cannot be reviewed. They are rebuilt whole on every run rather than
+patched, which is what stops them drifting from the workbooks one edit at a
+time -- the workbooks are where the data is edited, these are derived.
 
 Input  : META_DIRE/<release_id>/faculty_paper_list_w{first}_{last}.xlsx
              (get_faculty_paper_list.py, then candidate_pipeline/apply_paper_areas.py)
          manual_input/faculty.xlsx   (for homepage, and the area taxonomy)
-Output : manual_output/{metrics.json,faculty.csv,faculty_papers.csv}
-             -> copy into ../webpage/processed_data/
+Output : ../webpage/processed_data/{metrics.json,faculty.csv,faculty_papers.csv}
+         ../upload_version/data/{faculty.csv,faculty_paper_list_w{first}_{last}.csv}
+         --check writes neither
 
 See webpage/DATA_FORMAT.md for the schema these files follow.
 """
 
 import argparse
+import datetime
+import io
 import json
 import os
+import re
+import shutil
 import sys
 from collections import defaultdict
 
@@ -77,10 +98,27 @@ import meta_config as cfg  # noqa: E402
 from meta_config import META_DIRE, get_local_release_id  # noqa: E402
 from roster import load_roster, normalise, roster_names  # noqa: E402
 
-MANUAL_OUTPUT_DIR = os.path.join(BASE_DIR, 'manual_output')
 WEB_DATA_DIR = os.path.join(os.path.dirname(BASE_DIR), 'webpage', 'processed_data')
 
 FILES = ('metrics.json', 'faculty.csv', 'faculty_papers.csv')
+
+# The public data files, for the GitHub repository -- the roster and the paper
+# list themselves, not the aggregates above. They are written from the SAME run
+# so the published data and the served site can never describe different rosters.
+PUBLIC_DIR = os.path.join(os.path.dirname(BASE_DIR), 'upload_version', 'data')
+
+# Columns the public files carry. Selected, not copied wholesale: the workbooks
+# hold working columns a reader has no use for -- author_id (Semantic Scholar's,
+# unstable) and the roster's own area columns, and on the paper side the internal
+# join keys corpusid / venue_id / if_year / author_id. affiliation and country
+# are dropped from the paper list too: they describe the PERSON, so faculty.csv
+# is the one place they are read from and there is no second copy to fall stale.
+PUBLIC_ROSTER_COLUMNS = ['name', 'affiliation', 'country', 'homepage']
+PUBLIC_PAPER_LEADING = ['name', 'title', 'pub_year', 'venue_name',
+                        'impact_factor', 'n_authors']
+PUBLIC_PAPER_TRAILING = ['n_areas', 'area_evidence']
+
+_WHITESPACE = re.compile(r'\s+')
 
 # The two metrics the site offers. Both are sums over the papers in the reader's
 # (domain, window) selection, and both aggregate to an institution by summing
@@ -126,6 +164,112 @@ def clean_homepage(value):
         return text
     # a bare domain is a typo, not a scheme choice; keep the intent
     return f'https://{text}' if '.' in text and ' ' not in text else ''
+
+
+def backup_served_files():
+    """Copy what the site is currently serving into .bak_<date>/ beside it.
+
+    This step used to write to manual_output/ and leave the copy into the site
+    directory to you, so a re-export could never overwrite what was being served
+    by surprise. Writing straight to the site directory is one less step and one
+    less way for the two to disagree, but it does overwrite -- so the version
+    coming out is kept, and going back is a move rather than a rebuild.
+
+    Dated, not numbered: what you want to answer later is "what was the site
+    serving before today's run", and a date answers it. Several runs on one day
+    overwrite the same directory, which is the right behaviour -- the useful
+    baseline is the last one from BEFORE you started changing things.
+    """
+    existing = [f for f in FILES if os.path.isfile(os.path.join(WEB_DATA_DIR, f))]
+    if not existing:
+        return None
+    stamp = datetime.date.today().strftime('%Y%m%d')
+    backup_dire = os.path.join(WEB_DATA_DIR, f'.bak_{stamp}')
+    os.makedirs(backup_dire, exist_ok=True)
+    for name in existing:
+        shutil.copy2(os.path.join(WEB_DATA_DIR, name),
+                     os.path.join(backup_dire, name))
+    print(f'\nprevious site data -> {backup_dire}  ({", ".join(existing)})')
+    return backup_dire
+
+
+def _tidy_whitespace(df):
+    """Collapse every run of whitespace in text cells to one space.
+
+    A newline inside a quoted CSV field is legal, but it puts one record on
+    several physical lines, and GitHub's line-level diff is the whole reason
+    these files are CSV. The cases in practice are line-wrap artifacts in
+    Semantic Scholar titles and non-breaking spaces, so nothing is lost.
+    """
+    out = df.copy()
+    changed = 0
+    for column in out.columns:
+        if out[column].dtype != object:
+            continue
+        before = out[column]
+        after = before.map(
+            lambda v: _WHITESPACE.sub(' ', v).strip() if isinstance(v, str) else v)
+        changed += int((before.astype(str) != after.astype(str)).sum())
+        out[column] = after
+    return out, changed
+
+
+def write_public_csv(df, path):
+    """Write one public CSV, then read it back and refuse a run that lost a cell.
+
+    utf-8-sig, because thousands of cells hold non-ASCII characters and Excel
+    opens a plain UTF-8 CSV in the system codepage, mangling every one of them
+    for a contributor who double-clicks it. GitHub renders and diffs a BOM'd
+    file the same as a plain one. '\\n' endings so the diff is identical on
+    every platform.
+    """
+    df.to_csv(path, index=False, encoding='utf-8-sig', lineterminator='\n')
+
+    back = pd.read_csv(path, encoding='utf-8-sig')
+    name = os.path.basename(path)
+    assert list(back.columns) == list(df.columns), f'{name}: columns differ after round trip'
+    assert len(back) == len(df), f'{name}: {len(back)} rows back, {len(df)} written'
+    a = df.astype(str).replace({'nan': ''})
+    b = back.astype(str).replace({'nan': ''})
+    differ = (a.values != b.values)
+    if differ.any():
+        rows, cols = differ.nonzero()
+        for r, c in list(zip(rows, cols))[:5]:
+            print(f'  MISMATCH row {r} {df.columns[c]!r}: '
+                  f'{a.iat[r, c]!r} != {b.iat[r, c]!r}')
+        raise SystemExit(f'{name}: {int(differ.sum())} cells differ after round trip')
+
+    lines = io.open(path, encoding='utf-8-sig').read().count('\n')
+    assert lines == len(df) + 1, \
+        f'{name}: {lines} lines for {len(df)} rows + header -- a field spans lines'
+    print(f'  {name}: {len(df)} rows x {len(df.columns)} cols, '
+          f'{os.path.getsize(path) / 1e6:.1f} MB, round trip OK')
+
+
+def export_public_data(df_roster, sheet, areas, paper_csv_name):
+    """Write upload_version/data/ -- the roster and paper list the repo publishes.
+
+    Rebuilt whole from the workbooks every time rather than patched, so the
+    published CSVs cannot drift from them one edit at a time. The workbooks are
+    where the data is edited; these are derived.
+    """
+    os.makedirs(PUBLIC_DIR, exist_ok=True)
+    print(f'\npublic data -> {PUBLIC_DIR}')
+
+    missing = [c for c in PUBLIC_ROSTER_COLUMNS if c not in df_roster.columns]
+    if missing:
+        raise SystemExit(f'the roster is missing {missing}, which the public file needs')
+    roster_out, n = _tidy_whitespace(df_roster[PUBLIC_ROSTER_COLUMNS])
+    print(f'  roster: {n} cells tidied')
+    write_public_csv(roster_out, os.path.join(PUBLIC_DIR, 'faculty.csv'))
+
+    wanted = PUBLIC_PAPER_LEADING + list(areas) + PUBLIC_PAPER_TRAILING
+    missing = [c for c in wanted if c not in sheet.columns]
+    if missing:
+        raise SystemExit(f'the paper list is missing {missing}, which the public file needs')
+    papers_out, n = _tidy_whitespace(sheet[wanted])
+    print(f'  papers: {n} cells tidied')
+    write_public_csv(papers_out, os.path.join(PUBLIC_DIR, paper_csv_name))
 
 
 def find_column(columns, candidates):
@@ -303,11 +447,13 @@ def main():
         print('\n--check: nothing written')
         return
 
-    os.makedirs(MANUAL_OUTPUT_DIR, exist_ok=True)
-    faculty.to_csv(os.path.join(MANUAL_OUTPUT_DIR, 'faculty.csv'), index=False)
-    long_table.to_csv(os.path.join(MANUAL_OUTPUT_DIR, 'faculty_papers.csv'),
+    os.makedirs(WEB_DATA_DIR, exist_ok=True)
+    backup_served_files()
+
+    faculty.to_csv(os.path.join(WEB_DATA_DIR, 'faculty.csv'), index=False)
+    long_table.to_csv(os.path.join(WEB_DATA_DIR, 'faculty_papers.csv'),
                       index=False)
-    with open(os.path.join(MANUAL_OUTPUT_DIR, 'metrics.json'), 'w',
+    with open(os.path.join(WEB_DATA_DIR, 'metrics.json'), 'w',
               encoding='utf-8') as f:
         json.dump(metrics, f, indent=1, ensure_ascii=False)
         f.write('\n')
@@ -316,13 +462,16 @@ def main():
     # read as current
     for stale in ('institutions.csv', 'faculty_yearly.csv',
                   'faculty_area_year.csv'):
-        path = os.path.join(MANUAL_OUTPUT_DIR, stale)
+        path = os.path.join(WEB_DATA_DIR, stale)
         if os.path.isfile(path):
             os.remove(path)
             print(f'removed stale {stale} from the previous export')
 
-    print(f'\nwrote {", ".join(FILES)} to {MANUAL_OUTPUT_DIR}')
-    print(f'Copy them into {WEB_DATA_DIR} when you want the site to serve them.')
+    print(f'\nsite data -> {WEB_DATA_DIR}')
+    print(f'  wrote {", ".join(FILES)}')
+
+    export_public_data(df_roster, sheet, areas,
+                       cfg.faculty_paper_list_file_base() + '.csv')
     print('finished')
 
 

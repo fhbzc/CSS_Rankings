@@ -441,17 +441,54 @@ footer.
                 so weighted_if runs high, more so for papers with big author
                 lists. It is recorded in metrics.json rather than shown.
                 --check validates without writing.
+                Both sets of files go STRAIGHT to where they are read from --
+                the site's aggregates to ../webpage/processed_data/, and the
+                public data files to ../upload_version/data/ -- written from one
+                read of the same inputs, so the site and the repository can
+                never describe different rosters. What the site was serving is
+                copied to .bak_<date>/ beside it first, so overwriting it is a
+                move away from being undone rather than a rebuild.
+                The public files are the roster and the paper list themselves,
+                as CSV. CSV because
+                GitHub cannot preview or diff a workbook -- a pull request
+                against one shows "binary file changed" and nothing else, so a
+                correction cannot be reviewed. Columns are selected, not copied
+                wholesale: the internal join keys (corpusid, venue_id, if_year,
+                author_id) and the roster's own area columns stay behind, and
+                affiliation/country are published once, in faculty.csv, rather
+                than twice. Rebuilt whole every run rather than patched, so they
+                cannot drift from the workbooks one edit at a time.
    input:       data/<release_id>/faculty_paper_list_w{first}_{last}.xlsx
                     (step 6, then candidate_pipeline/apply_paper_areas.py)
                 manual_input/faculty.xlsx   (homepage, and the area taxonomy)
-   output:      manual_output/{metrics.json,faculty.csv,faculty_papers.csv}
+   output:      ../webpage/processed_data/{metrics.json,faculty.csv,
+                                           faculty_papers.csv}
+                ../upload_version/data/{faculty.csv,
+                                        faculty_paper_list_w{first}_{last}.csv}
+                ../webpage/processed_data/.bak_<date>/   the previous three
 
-                Everything is written to manual_output/. That is the
-                deliverable: COPY IT INTO webpage/processed_data/, which is the
-                directory the site reads. The copy is left to you deliberately,
-                so a re-export never overwrites what the site is serving until
-                you say so.
+                Both directories are OVERWRITTEN in place. Run --check first to
+                see what a run would produce without touching either.
                 See webpage/DATA_FORMAT.md for the schema these files follow.
+
+
+9a. sync_roster_to_paper_list.py   (only when the roster was edited after step 6)
+
+   description: copies the roster's per-person columns -- affiliation, country --
+                onto the paper list rows, keyed by name. Step 6 already stamps
+                them when it builds the sheet, so a freshly built one agrees by
+                construction; this is for afterwards, when a person's
+                affiliation is corrected or two spellings of one university are
+                unified by hand and rebuilding the sheet would mean re-reading
+                the whole S2AG dump for a column that has nothing to do with the
+                dump. Dry run by default; --write applies and leaves a .bak_sync.
+                A name in the sheet the roster no longer has is REPORTED AND
+                LEFT ALONE rather than blanked -- it means the person was
+                removed from the roster after the sheet was built, and blanking
+                would hide that. Rebuild the sheet to drop them properly.
+   input:       manual_input/faculty.xlsx   (authoritative)
+                data/<release_id>/faculty_paper_list_w{first}_{last}.xlsx
+   output:      the same paper list, those columns refreshed
 
 
 deprecated/ holds retired steps from earlier rounds. Nothing above reads them;
