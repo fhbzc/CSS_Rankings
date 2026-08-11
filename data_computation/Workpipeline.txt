@@ -1,0 +1,458 @@
+Work pipeline
+=============
+Run the steps in order. Each step is documented as description / input / output.
+
+WHAT THIS PIPELINE COMPUTES. Every rostered person's papers inside a year
+window, each carrying the IMPACT FACTOR of the venue it appeared in, aggregated
+into the two numbers the site ranks on: how many papers, and the sum of
+impact_factor / n_authors over them. That is the whole chain -- raw dump, venue
+impact factors, per-person paper list, area labels, export.
+
+ALL configuration lives in meta_config.py. No step carries a knob of its own, so
+a setting cannot be changed in one and left stale in the next:
+  S2AG_DIRE = ./raw_data   raw downloaded datasets
+  META_DIRE = ./data       processed files
+  RELEASE_ID               S2AG release date, '' = use the newest one on disk
+                           (also the date the site dates the ranking by)
+  FOCAL_YEAR               the year every window ends at
+  CONSIDER_LENGTHS         window lengths, e.g. [1, 2, 5, 10]
+  INVALID_VENUE_IDS        venues that do not count as publication (step 4)
+Everything is stored under a subdirectory named after the release date, so
+several releases can coexist side by side. The settings under "settings for the
+deprecated metric steps" in that file are read by nothing here.
+
+The focal window is DERIVED, never typed in:
+  [FOCAL_YEAR - max(CONSIDER_LENGTHS) + 1, FOCAL_YEAR]
+FOCAL_YEAR 2025 with lengths [1, 2, 5, 10] gives 2016-2025. Only papers PUBLISHED
+in that window are listed, because nothing outside it can reach the output.
+The impact factors behind them are NOT windowed the same way: they are computed
+over a span that starts earlier and reaches two years further back still, since
+the formula needs the venue's own history (step 5). The window says which papers
+are worth listing, not which links count.
+
+The per-window files carry the window in their names
+(faculty_paper_list_w2016_2025.xlsx). Change FOCAL_YEAR or the longest length
+and the steps look for files that do not exist yet, rather than reusing a sheet
+built for the old window.
+
+The final data records where it came from: get_faculty_paper_list.py writes a
+faculty_paper_list_..._meta.json beside its sheet (focal year, window, release
+id, invalid venue list), export_webpage_data.py carries that into metrics.json,
+and the site prints "Built from the Semantic Scholar release of <date>" in its
+footer.
+
+
+1. download_s2ag.py
+
+   description: downloads the raw Semantic Scholar bulk datasets listed in
+                DATASET_NAMES, dataset by dataset and shard by shard. Already
+                downloaded files are skipped, so it can be re-run to resume.
+                Once a dataset has every shard, a finished.pkl is written into
+                its directory; the later steps only pick up a release whose
+                dataset directories all carry one, so a download that is still
+                running (or died partway) is never processed as if complete.
+   input:       Semantic Scholar bulk-datasets API
+                (RELEASE_ID in meta_config.py; the API key comes from the
+                 SEMANTIC_SCHOLAR_API_KEY environment variable, never the source)
+   output:      raw_data/<release_id>/<dataset_name>/*.gz
+                raw_data/<release_id>/<dataset_name>/finished.pkl
+
+
+2. get_s2ag_meta.py
+
+   description: per-paper metadata from the papers dump, keyed by corpusid:
+                publication year, publication venue id, title and the list of
+                S2 author ids. Shards are processed in parallel and the
+                per-shard dicts merged. Tune with --workers / --batch-count.
+                Only what a later step reads is collected: DOI and an author id
+                -> name lookup were dropped once it was clear nothing
+                downstream loaded them.
+                cid2title is the expensive one, and is here because step 6
+                reads it: a title is ~80 bytes of unique text per paper, so on a
+                dump of a few hundred million papers that one dict is tens of
+                gigabytes, in the parent for the whole merge and on disk after.
+                Nothing else touches it -- if a run is short of memory it is the
+                first thing to drop, and the faculty sheet just loses a column.
+   input:       raw_data/<release_id>/papers/*.gz
+   output:      data/<release_id>/cid2pub_year.pkl              corpusid -> year
+                data/<release_id>/cid2venue_id.pkl              corpusid -> venue id
+                data/<release_id>/venue_id2venue_name_list.pkl  venue id -> [name]
+                data/<release_id>/cid2title.pkl                 corpusid -> title
+                data/<release_id>/cid2author_list.pkl           corpusid -> [author id]
+
+                Venues are keyed by S2's publicationvenueid, not by the venue
+                string, because the string is the venue as printed on THAT
+                paper: "PNAS" and "Proceedings of the National Academy of
+                Sciences" are one venue written two ways, and counting or
+                embedding them apart is wrong. name -> id is many-to-one, so
+                id -> name is one-to-many and venue_id2venue_name_list holds
+                every spelling seen, most frequent first ([0] is the one to
+                display).
+
+                A paper with no venue id has NO entry in cid2venue_id -- read it
+                with .get(cid), which returns None exactly for those. Two kinds
+                of paper land there: those with no venue at all (S2AG writes ""),
+                and those with a venue in print that S2 could not resolve to a
+                venue record. The second kind used to count under its raw string
+                and now reads as venue-less, so the script prints how many there
+                were; check that number before trusting a release.
+
+
+3. get_s2ag_citation.py   (--step build only, for this pipeline)
+
+   description: the citation network, unfiltered — every edge with both
+                endpoints present is kept, including edges whose endpoints have
+                no metadata. Two steps: "build" merges the shards in parallel
+                into citing -> [cited] and saves it; "invert" loads that back
+                and derives cited -> [citing] from it, so the two directions are
+                never both fully in memory. Run one step with --step build /
+                --step invert. Tune with --workers / --batch-count, separately
+                from step 2.
+                RUN ONLY --step build. Impact factors are counted from the
+                CITING side, so citing2cited is the only direction this pipeline
+                reads, and inverting costs a second pass over the whole network
+                to produce a file nothing here opens.
+                build is resumable per batch: each finished batch is written to
+                citation_build/ before the next starts and a rerun skips the ones
+                already there, so an interruption costs one batch rather than the
+                run. The scratch is deleted once the forward file is written;
+                --no-checkpoint turns it off where disk is tighter than time.
+   input:       raw_data/<release_id>/citations/*.gz
+   output:      data/<release_id>/citing2cited_cid_list.pkl  citing -> [cited]
+   scratch:     data/<release_id>/citation_build/batch_{i}_max_{n}.pkl
+
+
+4. get_valid_venue_s1.py   (then your decision, in meta_config.py)
+
+   description: every venue in the release, ranked by how many papers it
+                carries, as a CSV for you to read. This step only LOOKS -- it
+                writes no decision. Counted by venue ID, so a journal appearing
+                under four spellings is ONE row carrying all four spellings'
+                papers rather than four rows splitting them. Every spelling seen
+                is in venue_name, most frequent first, joined by " | ", so you
+                can recognise the venue whichever way it was written.
+                Two files: the full list and the top TOP_N (--top to change it).
+                The top one is the one to read -- venue counts have a very long
+                tail of one-paper venues and the top few thousand cover most of
+                the corpus.
+   input:       data/<release_id>/cid2venue_id.pkl
+                data/<release_id>/venue_id2venue_name_list.pkl
+   output:      data/<release_id>/venue_paper_count.csv        every venue
+                data/<release_id>/venue_paper_count_top{TOP_N}.csv
+                    rank, venue_id, venue_name, name_variants, paper_count,
+                    cumulative_share
+
+                THE DECISION IS YOURS AND IT IS MADE HERE. Open the top-N CSV
+                and copy the venue_id of each junk venue -- preprint servers,
+                placeholder and aggregator venues -- into
+
+                    meta_config.INVALID_VENUE_IDS
+
+                one per entry, with the venue's name in a comment beside it: a
+                bare list of UUIDs is unreadable six months later. Step 6 drops
+                every paper published in one of them, whatever impact factor the
+                graph can compute for it.
+                Exclusion is BY ID, which is why this step hands you ids. One id
+                covers every spelling S2 filed under it, so a single line takes
+                "arXiv", "arxiv" and "arXiv.org" together -- the name-keyed list
+                this replaced needed a line per spelling, and a spelling you did
+                not think of let its papers through in silence.
+
+
+5. compute_venue_impact_factor.py
+
+   description: each venue's impact factor, one figure per venue per year, on
+                the Journal Impact Factor definition computed over the S2AG
+                graph:
+
+                    IF(V, Y) = citations made DURING year Y to V's papers
+                                       published in Y-1 and Y-2
+                               ------------------------------------------
+                                 number of V's papers in Y-1 and Y-2
+
+                NOT the JCR number. Clarivate computes theirs on Web of Science
+                coverage with its own rules about citable items; this is the
+                same formula over a different corpus. Treat it as an S2AG-native
+                venue impact measure, not as a JIF you can quote.
+                Years computed: [FOCAL_YEAR - max(CONSIDER_LENGTHS),
+                FOCAL_YEAR - 2]. Both ends differ from the focal window on
+                purpose. It starts one year EARLIER so a paper published in the
+                first year of the window can still be given a figure from the
+                year before. It stops two years EARLIER because IF(Y) counts
+                citations made during year Y: at or near the release date that
+                year is not over, and a truncated count would read as a collapse
+                in impact rather than as missing data.
+                The papers behind it reach TWO YEARS FURTHER BACK than the first
+                year computed, which is what the formula asks for. They are not
+                restricted to the focal window and not screened at all, not even
+                by the invalid venue list: an impact factor is a property of the
+                venue over its whole output, and screening it would make the
+                denominator mean something else. Invalid venues are screened one
+                step later, on the PAPERS, not here.
+                Counted from the CITING side -- a citation counts by the year it
+                was MADE, so the citing paper's year decides whether the edge
+                matters at all and most papers drop out on one lookup. This is
+                why step 3 needs only the forward direction.
+   input:       data/<release_id>/cid2venue_id.pkl
+                data/<release_id>/cid2pub_year.pkl
+                data/<release_id>/venue_id2venue_name_list.pkl
+                data/<release_id>/citing2cited_cid_list.pkl
+   output:      data/<release_id>/venue_impact_factor_focal{FY}_len{L}.pkl
+                    venue id -> {year: impact factor}
+                data/<release_id>/venue_impact_factor_focal{FY}_len{L}.csv
+                    venue_id, venue_name, year, citable_papers, citations,
+                    impact_factor      (--no-csv skips it; it is large)
+                data/<release_id>/venue_impact_factor_focal{FY}_len{L}_meta.json
+
+                -1 means the impact factor DOES NOT EXIST for that venue and
+                year -- the venue published nothing in Y-1 or Y-2, so there is
+                no denominator. It is not a low score and not a zero: 0.0 is a
+                real figure meaning the venue published and was never cited.
+                Impact factors are never negative, so -1 can never collide with
+                a real value, but FILTER ON IT before averaging anything.
+                Every venue that published anywhere in the span gets a row for
+                every year, -1 included; a venue absent from the whole span is
+                left out, since rows of nothing but -1 say nothing.
+                The FILENAME spells out FOCAL_YEAR and the longest length rather
+                than using the w{first}_{last} tag, because these years are not
+                the focal window and the papers reach two years further back --
+                that tag would describe the span wrongly.
+                Read it through compute_venue_impact_factor.load(), which
+                refuses a file built for a different FOCAL_YEAR or
+                CONSIDER_LENGTHS.
+
+
+6. get_faculty_paper_list.py
+
+   description: every faculty member's focal-window papers, each with its
+                publication year and the impact factor of the venue it appeared
+                in -- the roster's author ids, the paper -> author credits from
+                step 2, and step 5's per-venue figures, joined. One row per
+                (person, paper). This is the table everything after it is built
+                from.
+                WHICH IMPACT FACTOR a paper gets: its venue's figure from ONE
+                REFERENCE YEAR, the same year for every paper, whatever year the
+                paper itself came out in. meta_config.impact_factor_reference_
+                year() picks it -- the middle of the focal window, clamped into
+                the range impact factors exist for, which is 2020 under the
+                current settings.
+                One year for everybody, rather than matching each paper to a
+                year near its own, means the number says the same thing on every
+                row: it ranks VENUES, and two papers in one venue are never
+                separated by which year they happened to appear in. The middle
+                of the window is the year closest to the whole window at once,
+                so no part of the roster is measured against a venue snapshot
+                far from it. The year used is kept in the sheet as if_year --
+                the same value on every row, so the file still says what it was
+                built from when it is read on its own.
+                A paper is DROPPED when it has no venue, when its venue is
+                absent from the impact factor table entirely, or when its venue
+                has no computable figure in the reference year. All three counts
+                are printed separately, because they are different problems: no
+                venue is a metadata gap, an absent venue published nothing in
+                the whole span behind the table, and a -1 in the reference year
+                is a venue that published nothing in the two years behind THAT
+                year. Only the last would be fixed by choosing a different
+                reference year, so watch that count if you move it: a year that
+                leaves a large share of the roster without a figure is not a
+                reference year, however recent or however central it is.
+                Papers with no publication year are dropped too and counted,
+                since they cannot be placed in the window either.
+                cid2author_list is inverted for the rostered ids ONLY; the full
+                inversion would be one entry per author in the whole graph and
+                the roster is a few thousand of them.
+                Keyed by NAME. The S2 author id will not do: S2 splits one
+                researcher across several ids and 811 of the 1091 roster rows
+                carry more than one, so those ids are UNIONED and the papers
+                deduplicated by corpusid -- a paper filed under two of someone's
+                ids counts once. Roster names are checked for uniqueness first
+                and the run stops if two rows share one, since merging two
+                people's work is an error that looks like a productive
+                researcher rather than like a bug.
+                A paper co-authored by two rostered people appears on both of
+                their rows, which is what "their papers" means on each.
+                Papers in a venue on meta_config.INVALID_VENUE_IDS are DROPPED,
+                the list you filled in at step 4 -- preprint servers and
+                placeholder venues are not where somebody published, whatever
+                impact factor the graph can compute for them (and it does
+                compute one: they are dropped for being on the list, not for
+                want of a number). That is the only other screen; no reference
+                or citation threshold applies here. The list is recorded in the
+                _meta.json, so a sheet built before you edited it can be told
+                apart afterwards.
+                manual_input/extra_paper_credits.csv, if present, credits
+                (person, paper) pairs BY HAND. S2's author ids are not stable --
+                it merges same-named researchers into one id and it retires ids
+                outright, and a retired one returns nothing at all rather than an
+                error, taking every paper behind it out of that person's list
+                silently. Adopting the live id is often not the fix either,
+                because the live one is frequently the merged one and would
+                import a stranger's work wholesale. That file is the way out:
+                name the paper and the person, and record WHY in its note column.
+   input:       manual_input/faculty.xlsx                    (your roster)
+                manual_input/extra_paper_credits.csv          (optional, yours)
+                data/<release_id>/cid2author_list.pkl
+                data/<release_id>/cid2pub_year.pkl
+                data/<release_id>/cid2venue_id.pkl
+                data/<release_id>/cid2title.pkl
+                data/<release_id>/venue_id2venue_name_list.pkl
+                data/<release_id>/venue_impact_factor_focal{FY}_len{L}.pkl
+   output:      data/<release_id>/faculty_paper_list_w{first}_{last}.xlsx
+                    name, affiliation, country, corpusid, title, pub_year,
+                    venue_name, venue_id, impact_factor, if_year, n_authors,
+                    author_id (which of their ids carried it)
+                data/<release_id>/faculty_paper_list_w{first}_{last}_meta.json
+                    the settings the run used
+
+                The venue is given BOTH ways: venue_name is the most frequent
+                spelling S2 saw, which is what a human recognises; venue_id is
+                what everything upstream keys on, survives a rename, and is what
+                you paste into INVALID_VENUE_IDS. A title the dump does not
+                carry comes out BLANK rather than dropping the paper.
+                n_authors counts the authors S2 RESOLVED to an author id, which
+                is what cid2author_list holds -- authors it could not resolve
+                carry a null id and are not in it, so the column is a LOWER
+                BOUND. The exact figure would need the raw author array counted
+                in step 2 and kept as another dict the size of the corpus.
+                Check how short it runs before dividing credit by it: step 9
+                divides by exactly this column.
+                A workbook, not a pickle: this table is read by people, in the
+                same program the roster is kept in. One row per (person, paper),
+                long format -- a cell holding a thousand comma-separated
+                corpusids is unreadable, and a wide table would need as many
+                columns as the most prolific person has papers. The header row
+                is frozen and the columns sized to read.
+                Rows are grouped by person in roster order and chronological
+                within a person, ties by corpusid, so a rerun on one release
+                gives the same sheet. A person with no surviving paper has NO
+                ROWS rather than one blank row, so the sheet never has to be
+                read as "empty cell, or nothing published".
+                The impact factors come through
+                compute_venue_impact_factor.load(), which REFUSES a table built
+                for a different FOCAL_YEAR or CONSIDER_LENGTHS.
+                The FILENAME carries the focal window and nothing else: it is
+                built from FOCAL_YEAR and the longest length, which is exactly
+                what the impact factor years derive from, so naming both would
+                say one thing twice. The roster changes the contents too but has
+                no version to name, so the stamp records its row and id counts.
+
+
+7. get_paper_category_s1.py
+
+   description: the text needed to judge what each faculty paper is ABOUT --
+                abstract, TLDR and S2's own field-of-study tags -- from the
+                Semantic Scholar API. The bulk dumps carry titles, and a title
+                alone is a thin basis for deciding which of a researcher's areas
+                a paper belongs to.
+                Only the papers in the step 6 sheet are fetched, and each
+                corpusid ONCE however many rostered authors share it. That is a
+                few hundred thousand at most, which is why this goes to the API
+                rather than downloading the "abstracts" dump: the dump is the
+                whole corpus, hundreds of gigabytes, to answer a question about
+                a rounding error's worth of it.
+                RESUMABLE, and built to be. The API is rate limited, so a full
+                fetch is measured in hours; every batch is written to the cache
+                before the next is asked for, and a rerun asks only for what is
+                missing. Interrupting it costs the batch in flight. Deleting the
+                cache file is how you force a refetch.
+                A paper the API does not know, or knows without an abstract, is
+                cached as an EMPTY record rather than left out. The distinction
+                that matters on a rerun is "asked and got nothing" versus "not
+                asked yet", and without the empty record every rerun would ask
+                again for the same permanently-missing papers.
+                Needs SEMANTIC_SCHOLAR_API_KEY.
+                --batch-size / --sleep tune the request rate.
+   input:       data/<release_id>/faculty_paper_list_w{first}_{last}.xlsx
+   output:      data/<release_id>/cid2content.pkl
+                    corpusid -> {'abstract', 'tldr', 'fields', 'title'}
+
+
+8. get_paper_abstract_backfill.py
+
+   description: fills in the abstracts Semantic Scholar does not have, from
+                OpenAlex, into the same cache. S2's coverage of abstracts is
+                uneven -- publisher agreements, not paper quality, decide what it
+                can redistribute -- so about a fifth of the faculty papers come
+                back from step 7 with nothing to judge on, including papers in
+                Nature and PNAS that plainly have an abstract somewhere.
+                OpenAlex indexes from Crossref and has a different set.
+                MATCHED BY DOI ONLY. OpenAlex can also be searched by title, and
+                that would recover more -- and would sooner or later attach the
+                wrong paper's abstract to a corpusid, which is a silent error
+                that survives every check downstream. A paper with no DOI simply
+                stays unrecovered and is reported as such. The DOIs come from S2,
+                which has them for papers whose abstracts it cannot
+                redistribute; that asymmetry is the whole reason this works.
+                RESUMABLE in the same way as step 7: every batch is merged into
+                the cache before the next is asked for, and a rerun asks only
+                about papers that still have no abstract. A paper OpenAlex does
+                not know is marked as asked, so a rerun does not ask again.
+                --mailto puts you in OpenAlex's polite pool, which is faster and
+                is what their documentation asks for. It is optional and empty by
+                default: it sends your address to a third party, which is your
+                call to make and not a default to inherit.
+   input:       data/<release_id>/cid2content.pkl
+   output:      the same file, with abstracts filled in where OpenAlex had one
+
+
+8a. AREA LABELS -- ../candidate_pipeline/   (between steps 8 and 9)
+
+   The export groups papers by AREA, and the areas are not in the S2AG dump:
+   they are judged from the title, abstract and TLDR steps 7-8 cached, in
+   batches, and written back into the faculty paper list as area columns. That
+   work lives in its own directory with its own README:
+
+     build_paper_area_dossiers.py   the sheet + cid2content.pkl -> batch files
+     judge_paper_areas.workflow.js  judges the batches
+     paper_area_status.py           how far the round has got; how to resume
+     apply_paper_areas.py           writes the labels back into the sheet
+
+   See candidate_pipeline/README.md, which is the handover document for a whole
+   update round -- roster changes, area assignment and the audits around them.
+   A paper in no area at all reaches step 9 with no row, which is what "the
+   person does not appear under that domain" means.
+
+
+9. export_webpage_data.py
+
+   description: turns the labelled faculty paper list into the files the webpage
+                reads. The site ranks people by what they published in a DOMAIN
+                over a YEAR WINDOW, so the numbers change with both, and the
+                per-person file is emitted LONG for the site to sum over
+                whatever window the reader picks. A new window then costs
+                nothing.
+                The grouping is (person, year, AREA COMBINATION) -- not (person,
+                year, area). That is what makes a paper countable ONCE when the
+                reader selects two domains it belongs to. Pre-aggregating per
+                area throws the combination away, and no amount of arithmetic
+                downstream recovers it: a paper in both A and B is
+                indistinguishable from two papers, one in each.
+                TWO METRICS, both summed, never averaged:
+                    paper_count   how many of that person's papers fall in the
+                                  selected domains and years, each counted once
+                    weighted_if   sum over those same papers of
+                                  impact_factor / n_authors
+                weighted_if credits a paper to its authors in equal shares.
+                Summing rather than averaging is deliberate and it decides how
+                the site reads -- a large department outranks a small one, and
+                prolific outranks selective. That is the intended ranking, not
+                an oversight.
+                n_authors runs low where S2 could not resolve authors (step 6),
+                so weighted_if runs high, more so for papers with big author
+                lists. It is recorded in metrics.json rather than shown.
+                --check validates without writing.
+   input:       data/<release_id>/faculty_paper_list_w{first}_{last}.xlsx
+                    (step 6, then candidate_pipeline/apply_paper_areas.py)
+                manual_input/faculty.xlsx   (homepage, and the area taxonomy)
+   output:      manual_output/{metrics.json,faculty.csv,faculty_papers.csv}
+
+                Everything is written to manual_output/. That is the
+                deliverable: COPY IT INTO webpage/processed_data/, which is the
+                directory the site reads. The copy is left to you deliberately,
+                so a re-export never overwrites what the site is serving until
+                you say so.
+                See webpage/DATA_FORMAT.md for the schema these files follow.
+
+
+deprecated/ holds retired steps from earlier rounds. Nothing above reads them;
+they have their own README.
