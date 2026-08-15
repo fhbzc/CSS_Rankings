@@ -2,11 +2,12 @@
 
 **A ranking of computational social science faculty, built to make CSS faculty search easier** — for prospective PhD students looking for an advisor, for departments running a search, and for anyone trying to find out who works on a topic and where. CSS is scattered across sociology, political science, information science, communication, computer science and public policy, so the people working on one question are rarely in one directory. This puts them in one place, filterable by research area.
 
-## Update
+## Updates
 On 2026-08-15:
   - Add profiles for 12 faculty and change affiliation for 1 faculty
   - Support display for only *Junior* faculty (academic age less than 12-years, counting from their first publication)
   - Add region selection based on continent
+  - Revise the paper categorization criteria, increasing the proportion of publications by the listed faculty classified as CSS papers from 53% to over 70%. (the current category is based on LLM as a judge which is not ideal, will think about how to make it better)
 
 ## Who is on the list
 
