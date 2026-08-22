@@ -5,6 +5,7 @@
 ## Updates
 On 2026-08-22:
   - Add profiles for 5 faculty
+  - Add links to other similar rankings in the bottom of README for better reach
 
 On 2026-08-15:
   - Add profiles for 12 faculty and change affiliation for 1 faculty
@@ -36,7 +37,9 @@ Scores come from the [Semantic Scholar Academic Graph](https://www.semanticschol
 
 The impact factors are **computed here, from the citation graph** — not taken from Clarivate. For a venue in year Y: the citations made during Y to the papers it published in Y−1 and Y−2, divided by how many papers those were. That is the standard Journal Impact Factor formula, applied to Semantic Scholar's coverage rather than Web of Science, so it covers CS conferences that a JCR number does not exist for. Every paper takes its venue's figure from a single reference year, so the number ranks venues and never separates two papers in the same venue by the year they happened to appear in.
 
-Both are **summed, never averaged**, over whatever the reader selected. That decides how the ranking reads: a prolific researcher outranks a selective one with the same average quality, and a large group outranks a small one. If you want selectivity instead, compare `weighted_if / paper_count` yourself — the exported data supports it.
+**Academic age**, separately, is how many years since the person's first papers appear — measured over their **whole publication record**, not the window above, because a career starts when it starts. Anyone at 12 years or less is what the site's "Junior faculty only" filter shows — the count is measured from the first paper rather than from the PhD, and a publication record usually starts a few years before the doctorate. Only `academic_age` is published here, not the flag: the flag is just `academic_age <= 12`, and shipping a derived column beside the measurement it comes from gives you two things that can disagree. Apply your own cut-off if 12 is not the one you want. It is not the earliest paper in Semantic Scholar: S2 files stray old records under merged author profiles, so an isolated paper separated from the rest of a record by five years or more is skipped, and the career starts at the first year with sustained work behind it. Without that correction a 2018 PhD with one bad row reads as having started in 1918. The error only ever runs one way — junk makes people look older — so a wrong `is_junior` is much more likely to be a missing junior than a spurious one.
+
+Both metrics are **summed, never averaged**, over whatever the reader selected. That decides how the ranking reads: a prolific researcher outranks a selective one with the same average quality, and a large group outranks a small one. If you want selectivity instead, compare `weighted_if / paper_count` yourself — the exported data supports it.
 
 ## Contributing
 
@@ -44,7 +47,7 @@ Both are **summed, never averaged**, over whatever the reader selected. That dec
 
 - **Open an issue** describing the person and what is wrong or missing. This is the easiest route, and you do not need to know the data format.
 - **Send a PR** editing the files directly, both in [`data/`](data/):
-  - [`data/faculty.csv`](data/faculty.csv) — who is on the roster: `name`, `affiliation`, `country`, `homepage`
+  - [`data/faculty.csv`](data/faculty.csv) — who is on the roster: `name`, `affiliation`, `country`, `homepage`, `academic_age`
   - [`data/faculty_paper_list_w2016_2025.csv`](data/faculty_paper_list_w2016_2025.csv) — their papers: `name`, `title`, `pub_year`, `venue_name`, `impact_factor`, `n_authors`, plus one column per research area (`1` = the paper belongs to it)
 
 Please say **why** in the issue or PR description — a homepage, a CV, a Google Scholar profile. Corrections to areas are as useful as corrections to people: the area labels are judged from titles and abstracts and they get things wrong.
@@ -55,8 +58,8 @@ Both files are **UTF-8 CSV**, one record per line, standard quoting — a field 
 
 | file | rows | what it is |
 | --- | --- | --- |
-| [`data/faculty.csv`](data/faculty.csv) | 1,089 | one row per person |
-| [`data/faculty_paper_list_w2016_2025.csv`](data/faculty_paper_list_w2016_2025.csv) | 48,410 | one row per (person, paper), 2016–2025 |
+| [`data/faculty.csv`](data/faculty.csv) | 1,106 | one row per person |
+| [`data/faculty_paper_list_w2016_2025.csv`](data/faculty_paper_list_w2016_2025.csv) | 48,941 | one row per (person, paper), 2016–2025 |
 
 A paper co-authored by two people on the roster appears on both of their rows. Papers are labelled across 21 research areas in 6 groups, each column `1` or `0`; a paper can belong to several. `n_areas` is how many, and `area_evidence` is a one-line summary of what the paper is about — the reading the labels were assigned from, so you can see whether a wrong label came from a wrong reading.
 
@@ -71,7 +74,7 @@ Run in order. All settings live in `meta_config.py`; the steps that talk to the 
 | 3 | `get_s2ag_citation.py` | Builds the citation network, citing → cited (`--step build` is all this pipeline needs). |
 | 4 | `get_valid_venue_s1.py` | Ranks every venue by paper count, for you to read. **You then list the junk venues** — preprint servers, placeholders — in `meta_config.INVALID_VENUE_IDS`. |
 | 5 | `compute_venue_impact_factor.py` | Each venue's impact factor per year: citations made during year Y to the venue's papers from Y−1 and Y−2, over how many papers those were. The Journal Impact Factor formula computed over S2AG — *not* the Clarivate JCR number. |
-| 6 | `get_faculty_paper_list.py` | Joins the roster, the paper→author credits and the impact factors into one row per (person, paper). Every paper takes its venue's figure from a single reference year, so the number ranks venues rather than years. Papers in an invalid venue are dropped here. |
+| 6 | `get_faculty_paper_list.py` | Joins the roster, the paper→author credits and the impact factors into one row per (person, paper). Every paper takes its venue's figure from a single reference year, so the number ranks venues rather than years. Papers in an invalid venue are dropped here. Also writes each person's academic age, computed over their **whole** record rather than the window. |
 | 7 | `get_paper_category_s1.py` | Fetches each paper's abstract, TLDR and field tags from the S2 API — the text an area label is judged from. Resumable; a full fetch takes hours. |
 | 8 | `get_paper_abstract_backfill.py` | Fills abstracts S2 cannot redistribute from OpenAlex, matched by DOI only. |
 | — | *(area labelling)* | The 21 area columns are judged from that text in batches and written back into the paper list. This is the step humans should check, and the one PRs are most useful for. |
@@ -85,3 +88,10 @@ Run in order. All settings live in `meta_config.py`; the steps that talk to the 
 - `n_authors` counts the authors Semantic Scholar resolved to an author id, so it is a **lower bound**, and `weighted_if` therefore runs slightly high — more so for papers with long author lists.
 - Impact factor is a property of the **venue**, not of the paper. It says where the work appeared, not how good or how cited that particular paper is.
 - A person's papers are found through their Semantic Scholar author ids, which are imperfect: S2 splits one researcher across several ids and merges distinct researchers into one. Missing or foreign papers usually trace back to this.
+
+## Related resources
+
+Rankings of the same kind, for other fields:
+
+- **[CSRankings](https://csrankings.org/)** — computer science
+- **[IO Psychology Rankings](https://wpengda.github.io/IO-PYSCH-RANKINGS/#countries=US%2CCA&from=2017&to=2026&metric=adj_count&min=1)** — industrial-organizational psychology
