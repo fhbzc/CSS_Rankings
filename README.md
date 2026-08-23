@@ -5,7 +5,6 @@
 ## Updates
 On 2026-08-22:
   - Add profiles for 5 faculty
-  - Add links to other similar rankings in the bottom of README for better reach
 
 On 2026-08-15:
   - Add profiles for 12 faculty and change affiliation for 1 faculty
