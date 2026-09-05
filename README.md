@@ -3,8 +3,14 @@
 **A ranking of computational social science faculty, built to make CSS faculty search easier** — for prospective PhD students looking for an advisor, for departments running a search, and for anyone trying to find out who works on a topic and where. CSS is scattered across sociology, political science, information science, communication, computer science and public policy, so the people working on one question are rarely in one directory. This puts them in one place, filterable by research area.
 
 ## Updates
+On 2026-09-05:
+  - Add profiles for 12 faculty (Turkey and the Netherlands)
+  - Withhold 23 papers that Semantic Scholar had filed under a roster member but that belong to a same-named researcher — the ids stay, since the rest of each profile is right
+  - Drop `academic_age` from `data/faculty.csv`. The site's *Junior* filter still uses it; the per-person number is read off S2's record of a career and is not solid enough to publish as one
+
 On 2026-08-22:
   - Add profiles for 5 faculty
+  - Add links to other similar rankings in the bottom of README for better reach
 
 On 2026-08-15:
   - Add profiles for 12 faculty and change affiliation for 1 faculty
@@ -36,7 +42,7 @@ Scores come from the [Semantic Scholar Academic Graph](https://www.semanticschol
 
 The impact factors are **computed here, from the citation graph** — not taken from Clarivate. For a venue in year Y: the citations made during Y to the papers it published in Y−1 and Y−2, divided by how many papers those were. That is the standard Journal Impact Factor formula, applied to Semantic Scholar's coverage rather than Web of Science, so it covers CS conferences that a JCR number does not exist for. Every paper takes its venue's figure from a single reference year, so the number ranks venues and never separates two papers in the same venue by the year they happened to appear in.
 
-**Academic age**, separately, is how many years since the person's first papers appear — measured over their **whole publication record**, not the window above, because a career starts when it starts. Anyone at 12 years or less is what the site's "Junior faculty only" filter shows — the count is measured from the first paper rather than from the PhD, and a publication record usually starts a few years before the doctorate. Only `academic_age` is published here, not the flag: the flag is just `academic_age <= 12`, and shipping a derived column beside the measurement it comes from gives you two things that can disagree. Apply your own cut-off if 12 is not the one you want. It is not the earliest paper in Semantic Scholar: S2 files stray old records under merged author profiles, so an isolated paper separated from the rest of a record by five years or more is skipped, and the career starts at the first year with sustained work behind it. Without that correction a 2018 PhD with one bad row reads as having started in 1918. The error only ever runs one way — junk makes people look older — so a wrong `is_junior` is much more likely to be a missing junior than a spurious one.
+**Academic age** drives the site's "Junior faculty only" filter — how many years since the person's first papers appear, measured over their **whole publication record** rather than the window above, with 12 years or less counting as junior. It is **not published here**, and deliberately: it is read off Semantic Scholar's record of a person, so an author id that is missing early work dates a career too late, and one merged with a same-named researcher dates it too early. A coarse yes/no filter survives that error; a per-person number in a CSV would be read as a fact about the person, and it is not solid enough to be one.
 
 Both metrics are **summed, never averaged**, over whatever the reader selected. That decides how the ranking reads: a prolific researcher outranks a selective one with the same average quality, and a large group outranks a small one. If you want selectivity instead, compare `weighted_if / paper_count` yourself — the exported data supports it.
 
@@ -46,7 +52,7 @@ Both metrics are **summed, never averaged**, over whatever the reader selected. 
 
 - **Open an issue** describing the person and what is wrong or missing. This is the easiest route, and you do not need to know the data format.
 - **Send a PR** editing the files directly, both in [`data/`](data/):
-  - [`data/faculty.csv`](data/faculty.csv) — who is on the roster: `name`, `affiliation`, `country`, `homepage`, `academic_age`
+  - [`data/faculty.csv`](data/faculty.csv) — who is on the roster: `name`, `affiliation`, `country`, `homepage`
   - [`data/faculty_paper_list_w2016_2025.csv`](data/faculty_paper_list_w2016_2025.csv) — their papers: `name`, `title`, `pub_year`, `venue_name`, `impact_factor`, `n_authors`, plus one column per research area (`1` = the paper belongs to it)
 
 Please say **why** in the issue or PR description — a homepage, a CV, a Google Scholar profile. Corrections to areas are as useful as corrections to people: the area labels are judged from titles and abstracts and they get things wrong.
@@ -57,8 +63,8 @@ Both files are **UTF-8 CSV**, one record per line, standard quoting — a field 
 
 | file | rows | what it is |
 | --- | --- | --- |
-| [`data/faculty.csv`](data/faculty.csv) | 1,106 | one row per person |
-| [`data/faculty_paper_list_w2016_2025.csv`](data/faculty_paper_list_w2016_2025.csv) | 48,941 | one row per (person, paper), 2016–2025 |
+| [`data/faculty.csv`](data/faculty.csv) | 1,118 | one row per person |
+| [`data/faculty_paper_list_w2016_2025.csv`](data/faculty_paper_list_w2016_2025.csv) | 49,155 | one row per (person, paper), 2016–2025 |
 
 A paper co-authored by two people on the roster appears on both of their rows. Papers are labelled across 21 research areas in 6 groups, each column `1` or `0`; a paper can belong to several. `n_areas` is how many, and `area_evidence` is a one-line summary of what the paper is about — the reading the labels were assigned from, so you can see whether a wrong label came from a wrong reading.
 
